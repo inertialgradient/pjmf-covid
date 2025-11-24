@@ -8,6 +8,9 @@ Monthly hospitalization rates from [CDC COVID-NET Surveillance][cdc].
 
 https://jmromer-pjmf.streamlit.app
 
+[3fd1f85d-fdc3-4185-af21-3f1b518f59b5.webm](https://github.com/user-attachments/assets/22d79b36-1b0a-4fb5-800d-b4197c5a489b)
+
+
 ## Local
 
 ```
