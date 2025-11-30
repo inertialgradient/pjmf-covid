@@ -1,116 +1,143 @@
-import streamlit as st
+from __future__ import annotations
+
+from datetime import datetime
+
 import pandas as pd
 import plotly.express as px
-import pydeck as pdk
-
-# Data state
-# ----------
-if "data_refreshed" not in st.session_state:
-    st.session_state["data_refreshed"] = False
-
-# Page config
-# -----------
-st.set_page_config(page_title="US COVID-19 Hospitalization Dashboard", layout="wide")
-
-st.title("US COVID-19 Hospitalization Dashboard")
-st.markdown(
-    "Monthly hospitalization rates from CDC COVID-NET Surveillance. "
-    "Rates represent laboratory-confirmed COVID-19 hospitalizations per 100,000 residents "
-    "in participating surveillance areas."
-)
+import streamlit as st
 
 
-# Data loading
-# ------------
 DATA_URL = "https://data.cdc.gov/api/views/cf5u-bm9w/rows.csv"
+LOCAL_DATA_PATH = "data.csv"
+COLUMN_RENAME_MAP = {"monthlyrate": "hospitalization_rate"}
+
+
+def initialize_session_state() -> None:
+    """Ensure required session state keys exist."""
+    st.session_state.setdefault("data_refreshed", False)
+
 
 @st.cache_data
-def load_data(refreshed: bool = False):
-    url = DATA_URL if refreshed else "./data.csv"
-    df = pd.read_csv(url)
-    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
-    df["_yearmonth"] = (
-        df["_yearmonth"]
-        .astype(float)  # handles "202202.0"
-        .astype(int)  # yields 202202
-        .astype(str)  # "202202"
-        .str.zfill(6)  # ensure "YYYYMM"
+def load_data(refreshed: bool = False) -> pd.DataFrame:
+    """Load and clean COVID hospitalization data."""
+    source = DATA_URL if refreshed else LOCAL_DATA_PATH
+    raw_df = pd.read_csv(source)
+    return prepare_data(raw_df)
+
+
+def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize column names, derive date fields, and standardize rates."""
+    cleaned = df.copy()
+    cleaned.columns = [c.strip().lower().replace(" ", "_") for c in cleaned.columns]
+    cleaned = cleaned.rename(columns=COLUMN_RENAME_MAP)
+    cleaned["_yearmonth"] = (
+        pd.to_numeric(cleaned["_yearmonth"], errors="coerce")
+        .astype("Int64")
+        .astype(str)
+        .str.zfill(6)
     )
-    df["date"] = pd.to_datetime(df["_yearmonth"] + "01", format="%Y%m%d")
-    df = df.rename(columns={"monthlyrate": "hospitalization_rate"})
-    return df
-
-df = load_data(st.session_state["data_refreshed"])
-
-# Sidebar
-# -------
-st.sidebar.write("### Data Controls")
-
-# Disable refresh button after the first press
-refresh_disabled = st.session_state["data_refreshed"]
-if st.sidebar.button("Fetch updated data", disabled=refresh_disabled):
-    st.session_state["data_refreshed"] = True
-    st.cache_data.clear()
-    st.rerun()
-
-# Data filters
-states_filter = st.sidebar.multiselect("Filter by state:", sorted(df["state"].unique()))
-age_filter = st.sidebar.multiselect("Filter by age group:", sorted(df["agecategory_legend"].unique()))
-sex_filter = st.sidebar.multiselect("Filter by sex:", sorted(df["sex_label"].unique()))
-race_filter = st.sidebar.multiselect("Filter by race:", sorted(df["race_label"].unique()))
-
-# Date range slider
-min_date = df["date"].min().to_pydatetime()
-max_date = df["date"].max().to_pydatetime()
-date_range = st.sidebar.slider(
-    "Date range:",
-    min_value=min_date,
-    max_value=max_date,
-    value=(min_date, max_date),
-    format="YYYY-MM",
-)
+    cleaned["date"] = pd.to_datetime(
+        cleaned["_yearmonth"] + "01", format="%Y%m%d", errors="coerce"
+    )
+    cleaned = cleaned.dropna(subset=["date"])
+    return cleaned
 
 
-# Filtering Pipeline
-# ------------------
-df_filtered = df.copy()
+def render_sidebar(df: pd.DataFrame) -> tuple[tuple[datetime, datetime], dict[str, list[str]]]:
+    """Render sidebar controls and return the selected filters."""
+    st.sidebar.header("Data Controls")
 
-df_filtered = df_filtered[
-    (df_filtered["date"] >= date_range[0]) & (df_filtered["date"] <= date_range[1])
-]
+    refresh_disabled = st.session_state["data_refreshed"]
+    if st.sidebar.button("Fetch updated data", disabled=refresh_disabled):
+        st.session_state["data_refreshed"] = True
+        st.cache_data.clear()
+        st.rerun()
 
-if states_filter:
-    df_filtered = df_filtered[df_filtered["state"].isin(states_filter)]
-if age_filter:
-    df_filtered = df_filtered[df_filtered["agecategory_legend"].isin(age_filter)]
-if sex_filter:
-    df_filtered = df_filtered[df_filtered["sex_label"].isin(sex_filter)]
-if race_filter:
-    df_filtered = df_filtered[df_filtered["race_label"].isin(race_filter)]
+    min_date = df["date"].min().to_pydatetime()
+    max_date = df["date"].max().to_pydatetime()
+    date_range = st.sidebar.slider(
+        "Date range:",
+        min_value=min_date,
+        max_value=max_date,
+        value=(min_date, max_date),
+        format="YYYY-MM",
+    )
 
+    filter_config = {
+        "state": "Filter by state:",
+        "agecategory_legend": "Filter by age group:",
+        "sex_label": "Filter by sex:",
+        "race_label": "Filter by race:",
+    }
 
-# Time-Series Plot 
-# ----------------
-df_summary = (
-    df_filtered.groupby(["state", "date"])
-    .agg({"hospitalization_rate": "mean"})
-    .reset_index()
-    .sort_values("date")
-)
+    selections: dict[str, list[str]] = {}
+    for column, label in filter_config.items():
+        selections[column] = st.sidebar.multiselect(label, sorted(df[column].unique()))
 
-st.subheader("Trend Over Time")
-fig_nat = px.line(
-    df_summary,
-    x="date",
-    y="hospitalization_rate",
-    color="state",
-    labels={"hospitalization_rate": "Rate per 100,000"},
-)
-st.plotly_chart(fig_nat, width="stretch", key="national-trend")
+    return date_range, selections
 
 
-# Raw Data Table
-# ---------------
-st.subheader("Raw Data")
-df_table = df_filtered.sort_values("date", ascending=False)
-st.dataframe(df_table, width="stretch", key="raw-data-table")
+def apply_filters(
+    df: pd.DataFrame, date_range: tuple[datetime, datetime], selections: dict[str, list[str]]
+) -> pd.DataFrame:
+    """Apply date and categorical filters to the dataset."""
+    filtered = df.loc[(df["date"] >= date_range[0]) & (df["date"] <= date_range[1])]
+    for column, values in selections.items():
+        if values:
+            filtered = filtered[filtered[column].isin(values)]
+    return filtered
+
+
+def render_time_series(df: pd.DataFrame) -> None:
+    """Plot hospitalization rates over time."""
+    if df.empty:
+        st.info("No data available for the selected filters.")
+        return
+
+    summary = (
+        df.groupby(["state", "date"], as_index=False)["hospitalization_rate"]
+        .mean()
+        .sort_values("date")
+    )
+    fig = px.line(
+        summary,
+        x="date",
+        y="hospitalization_rate",
+        color="state",
+        labels={"hospitalization_rate": "Rate per 100,000"},
+    )
+    st.subheader("Trend Over Time")
+    st.plotly_chart(fig, use_container_width=True, key="national-trend")
+
+
+def render_data_table(df: pd.DataFrame) -> None:
+    """Display the filtered dataset."""
+    st.subheader("Raw Data")
+    st.dataframe(
+        df.sort_values("date", ascending=False),
+        use_container_width=True,
+        key="raw-data-table",
+    )
+
+
+def main() -> None:
+    st.set_page_config(page_title="US COVID-19 Hospitalization Dashboard", layout="wide")
+    initialize_session_state()
+
+    st.title("US COVID-19 Hospitalization Dashboard")
+    st.markdown(
+        "Monthly hospitalization rates from CDC COVID-NET Surveillance. "
+        "Rates represent laboratory-confirmed COVID-19 hospitalizations per 100,000 residents "
+        "in participating surveillance areas."
+    )
+
+    df = load_data(st.session_state["data_refreshed"])
+    date_range, selections = render_sidebar(df)
+    filtered_df = apply_filters(df, date_range, selections)
+
+    render_time_series(filtered_df)
+    render_data_table(filtered_df)
+
+
+if __name__ == "__main__":
+    main()
